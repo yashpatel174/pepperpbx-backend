@@ -1,6 +1,9 @@
 import cors from "cors";
 import express from "express";
 import extensionRoutes from "./routes/extension.route";
+import gatewayRoutes from "./routes/gateway.route";
+import hiveUserRoutes from "./routes/hiveuser.route";
+import { errorMiddleware } from "./middleware/error.middleware";
 
 const app = express();
 
@@ -14,5 +17,9 @@ app.get("/", (_req, res) => {
 });
 
 app.use("/api/extensions", extensionRoutes);
+app.use("/api/gateways", gatewayRoutes);
+app.use("/api/hiveuser", hiveUserRoutes);
+
+app.use(errorMiddleware);
 
 export default app;

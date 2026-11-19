@@ -1,0 +1,648 @@
+import {
+  ExecuteValues,
+  PoolConnection,
+  ResultSetHeader,
+  RowDataPacket,
+} from "mysql2/promise";
+import pool from "../config/db";
+import {
+  CreatedGateway,
+  CreateGatewayResult,
+  GatewayAction,
+  GatewayDetails,
+  GatewayDetailsResponse,
+  GatewayEnabledToggleResponse,
+  GatewayIdRow,
+  GatewayListQuery,
+  GatewayListResult,
+  GatewayPayload,
+  GatewayRow,
+  GatewayStatusRow,
+  GatewayToggleResponse,
+  UPDATE_COLUMNS,
+  UpdatedGatewayResponse,
+  UpdatedGatewayRow,
+} from "../types/gateway.types";
+import { AppError } from "../utils/AppError";
+
+const TABLE = "`gateways`";
+
+const ALLOWED_COLUMNS = new Set<keyof GatewayPayload>([
+  "gateway",
+  "username",
+  "password",
+  "from_user",
+  "domain_name",
+  "sbcDomainIp",
+  "proxy",
+  "realm",
+  "expire_seconds",
+  "retry_seconds",
+  "context",
+  "profile",
+  "register",
+  "enabled",
+  "description",
+  "auth_username",
+  "extension",
+  "register_transport",
+  "register_proxy",
+  "outbound_proxy",
+  "sip_cid_type",
+  "codec_prefs",
+  "ping",
+  "ping_min",
+  "ping_max",
+  "channels",
+  "hostname",
+  "distinct_to",
+  "caller_id_in_from",
+  "supress_cng",
+  "extension_in_contact",
+]);
+
+export const createGatewayService = async (
+  payload: GatewayPayload,
+): Promise<CreateGatewayResult> => {
+  const columns = Object.keys(payload).filter((column) =>
+    ALLOWED_COLUMNS.has(column as keyof GatewayPayload),
+  );
+
+  if (columns.length === 0) {
+    throw new Error("Valid gateway payload is required");
+  }
+
+  // Preserve false, zero, empty strings and null.
+  const values = columns.map(
+    (column) => payload[column as keyof GatewayPayload],
+  );
+
+  const columnNames = columns.map((column) => `\`${column}\``).join(", ");
+
+  const placeholders = columns.map(() => "?").join(", ");
+
+  const sql = `
+    INSERT INTO ${TABLE} (${columnNames})
+    VALUES (${placeholders})
+  `;
+
+  const queryValues: ExecuteValues[] = values.map((value) =>
+    value === undefined ? null : value,
+  );
+
+  const [result] = await pool.execute<ResultSetHeader>(sql, queryValues);
+
+  if (result.affectedRows !== 1 || !result.insertId) {
+    throw new Error("Gateway creation failed");
+  }
+
+  // Fetch only safe response fields.
+  const [rows] = await pool.execute<CreatedGateway[]>(
+    `
+      SELECT
+        id,
+        gateway_uuid,
+        gateway,
+        domain_name,
+        sbcDomainIp,
+        proxy,
+        expire_seconds,
+        retry_seconds,
+        register,
+        enabled,
+        created_at,
+        updated_at
+      FROM ${TABLE}
+      WHERE id = ?
+      LIMIT 1
+    `,
+    [result.insertId],
+  );
+
+  const createdGateway = rows[0];
+
+  if (!createdGateway) {
+    throw new Error("Gateway creation could not be verified");
+  }
+
+  return {
+    ...createdGateway,
+    register: Boolean(createdGateway.register),
+    enabled: Boolean(createdGateway.enabled),
+  };
+};
+
+const SEARCH_COLUMNS = [
+  "gateway",
+  "gateway_uuid",
+  "domain_name",
+  "sbcDomainIp",
+  "proxy",
+  "username",
+  "extension",
+  "hostname",
+  "description",
+] as const;
+
+const escapeLike = (value: string): string => value.replace(/[\\%_]/g, "\\$&");
+
+export const getGatewaysService = async (
+  filters: GatewayListQuery,
+): Promise<GatewayListResult> => {
+  const { page, pageSize, search } = filters;
+
+  const offset = (page - 1) * pageSize;
+
+  if (!Number.isSafeInteger(offset)) {
+    throw new AppError("Invalid pagination offset", 400);
+  }
+
+  const whereConditions: string[] = [];
+  const whereValues: string[] = [];
+
+  if (search) {
+    const searchPattern = `${escapeLike(search)}%`;
+
+    const searchConditions = SEARCH_COLUMNS.map(
+      (column) => `\`${column}\` LIKE ? ESCAPE '\\\\'`,
+    );
+
+    whereConditions.push(`(${searchConditions.join(" OR ")})`);
+
+    whereValues.push(...SEARCH_COLUMNS.map(() => searchPattern));
+  }
+
+  const whereClause = whereConditions.length
+    ? `WHERE ${whereConditions.join(" AND ")}`
+    : "";
+
+  const connection: PoolConnection = await pool.getConnection();
+
+  try {
+    // Both SELECT queries share a consistent snapshot.
+    await connection.beginTransaction();
+
+    const [countRows] = await connection.execute<
+      (RowDataPacket & { totalRecords: number })[]
+    >(
+      `
+        SELECT COUNT(*) AS totalRecords
+        FROM ${TABLE}
+        ${whereClause}
+      `,
+      whereValues,
+    );
+
+    const totalRecords = Number(countRows[0]?.totalRecords ?? 0);
+
+    const totalPages = Math.ceil(totalRecords / pageSize);
+
+    const [rows] = await connection.execute<GatewayRow[]>(
+      `
+        SELECT
+          id,
+          gateway_uuid,
+          gateway,
+          username,
+          from_user,
+          domain_name,
+          sbcDomainIp,
+          proxy,
+          realm,
+          expire_seconds,
+          retry_seconds,
+          context,
+          profile,
+          register,
+          enabled,
+          status,
+          description,
+          auth_username,
+          extension,
+          register_transport,
+          register_proxy,
+          outbound_proxy,
+          sip_cid_type,
+          codec_prefs,
+          ping,
+          ping_min,
+          ping_max,
+          channels,
+          hostname,
+          distinct_to,
+          caller_id_in_from,
+          supress_cng,
+          extension_in_contact,
+          created_at,
+          updated_at
+        FROM ${TABLE}
+        ${whereClause}
+        ORDER BY id DESC
+        LIMIT ? OFFSET ?
+      `,
+      [...whereValues, pageSize, offset],
+    );
+
+    await connection.commit();
+
+    const gateways = rows.map((gateway) => ({
+      ...gateway,
+      register: Boolean(gateway.register),
+      enabled: Boolean(gateway.enabled),
+      distinct_to: Boolean(gateway.distinct_to),
+      caller_id_in_from: Boolean(gateway.caller_id_in_from),
+      supress_cng: Boolean(gateway.supress_cng),
+      extension_in_contact: Boolean(gateway.extension_in_contact),
+      status: gateway.status === true ? "Started" : "Stopped",
+    }));
+
+    return {
+      gateways,
+      pagination: {
+        currentPage: page,
+        pageSize,
+        totalRecords,
+        totalPages,
+        hasNextPage: page < totalPages,
+        hasPreviousPage: page > 1 && totalPages > 0,
+      },
+    };
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+};
+
+export const getGatewayDetailsService = async (
+  gateway_uuid: string,
+): Promise<GatewayDetailsResponse> => {
+  const [rows] = await pool.execute<GatewayDetails[]>(
+    `
+      SELECT
+        id,
+        gateway_uuid,
+        gateway,
+        username,
+        from_user,
+        domain_name,
+        sbcDomainIp,
+        proxy,
+        realm,
+        expire_seconds,
+        retry_seconds,
+        context,
+        profile,
+        register,
+        enabled,
+        description,
+        auth_username,
+        extension,
+        register_transport,
+        register_proxy,
+        outbound_proxy,
+        sip_cid_type,
+        codec_prefs,
+        ping,
+        ping_min,
+        ping_max,
+        channels,
+        hostname,
+        distinct_to,
+        caller_id_in_from,
+        supress_cng,
+        extension_in_contact,
+        created_at,
+        updated_at
+      FROM ${TABLE}
+      WHERE gateway_uuid = ?
+      LIMIT 1
+    `,
+    [gateway_uuid],
+  );
+
+  const gateway = rows[0];
+
+  if (!gateway) {
+    throw new AppError("Gateway not found", 404);
+  }
+
+  return {
+    ...gateway,
+    register: Boolean(gateway.register),
+    enabled: Boolean(gateway.enabled),
+    distinct_to: Boolean(gateway.distinct_to),
+    caller_id_in_from: Boolean(gateway.caller_id_in_from),
+    supress_cng: Boolean(gateway.supress_cng),
+    extension_in_contact: Boolean(gateway.extension_in_contact),
+  };
+};
+
+export const updateGatewayService = async (
+  gateway_uuid: string,
+  payload: GatewayPayload,
+): Promise<UpdatedGatewayResponse> => {
+  const connection: PoolConnection = await pool.getConnection();
+
+  let transactionStarted = false;
+
+  try {
+    await connection.beginTransaction();
+    transactionStarted = true;
+
+    const [existingRows] = await connection.execute<GatewayIdRow[]>(
+      `SELECT id, username, password
+       FROM gateways
+       WHERE gateway_uuid = ?
+       LIMIT 1
+       FOR UPDATE`,
+      [gateway_uuid],
+    );
+
+    if (existingRows.length === 0) {
+      throw new AppError("Gateway not found", 404);
+    }
+
+    const existingGateway = existingRows[0];
+
+    const finalUsername = payload.username;
+
+    if (payload.register === true) {
+      if (typeof finalUsername !== "string" || !finalUsername.trim()) {
+        throw new AppError(
+          "Username is required when registration is enabled",
+          400,
+        );
+      }
+    }
+
+    const hasNewPassword =
+      typeof payload.password === "string" && payload.password.length > 0;
+
+    const columns = UPDATE_COLUMNS.filter(
+      (column) => column !== "password" || hasNewPassword,
+    );
+
+    const setClause = columns.map((column) => `\`${column}\` = ?`).join(", ");
+
+    // const values = columns.map((column) => payload[column]);
+    const values: ExecuteValues[] = columns.map((column) => {
+      const value = payload[column];
+      if (value === undefined) {
+        throw new AppError(`Invalid undefined value for ${column}`, 400);
+      }
+      return value;
+    });
+
+    const queryValues: ExecuteValues[] = [...values, gateway_uuid];
+
+    await connection.execute<ResultSetHeader>(
+      `UPDATE gateways
+   SET ${setClause}
+   WHERE gateway_uuid = ?`,
+      queryValues,
+    );
+
+    const [updatedRows] = await connection.execute<UpdatedGatewayRow[]>(
+      `SELECT
+          id,
+          gateway_uuid,
+          gateway,
+          username,
+          from_user,
+          domain_name,
+          sbcDomainIp,
+          proxy,
+          realm,
+          expire_seconds,
+          retry_seconds,
+          context,
+          profile,
+          register,
+          enabled,
+          description,
+          auth_username,
+          extension,
+          register_transport,
+          register_proxy,
+          outbound_proxy,
+          sip_cid_type,
+          codec_prefs,
+          ping,
+          ping_min,
+          ping_max,
+          channels,
+          status,
+          hostname,
+          distinct_to,
+          caller_id_in_from,
+          supress_cng,
+          extension_in_contact,
+          created_at,
+          updated_at
+        FROM gateways
+        WHERE gateway_uuid = ?
+        LIMIT 1`,
+      [gateway_uuid],
+    );
+
+    if (updatedRows.length === 0) {
+      throw new AppError("Gateway not found", 404);
+    }
+
+    await connection.commit();
+    transactionStarted = false;
+
+    const gateway = updatedRows[0];
+
+    return {
+      ...gateway,
+      register: Boolean(gateway.register),
+      enabled: Boolean(gateway.enabled),
+      distinct_to: Boolean(gateway.distinct_to),
+      caller_id_in_from: Boolean(gateway.caller_id_in_from),
+      supress_cng: Boolean(gateway.supress_cng),
+      extension_in_contact: Boolean(gateway.extension_in_contact),
+    };
+  } catch (error) {
+    if (transactionStarted) {
+      try {
+        await connection.rollback();
+      } catch (rollbackError) {
+        console.error("Gateway update rollback failed:", rollbackError);
+      }
+    }
+
+    throw error;
+  } finally {
+    connection.release();
+  }
+};
+
+export const toggleGatewayStatusService = async (
+  gatewayUuids: string[],
+  action: GatewayAction,
+): Promise<GatewayToggleResponse> => {
+  const connection: PoolConnection = await pool.getConnection();
+
+  let transactionStarted = false;
+
+  // start = 1 (enabled), stop = 0 (disabled)
+  const enabledValue = action === "start" ? 1 : 0;
+
+  try {
+    await connection.beginTransaction();
+    transactionStarted = true;
+
+    const placeholders = gatewayUuids.map(() => "?").join(", ");
+
+    // Lock all requested gateways before updating.
+    const [existingRows] = await connection.execute<GatewayStatusRow[]>(
+      `SELECT gateway_uuid, status
+         FROM gateways
+         WHERE gateway_uuid IN (${placeholders})
+         ORDER BY gateway_uuid
+         FOR UPDATE`,
+      gatewayUuids,
+    );
+
+    const existingUuids = new Set(
+      existingRows.map((row) => row.gateway_uuid.toLowerCase()),
+    );
+
+    const missingUuids = gatewayUuids.filter(
+      (uuid) => !existingUuids.has(uuid),
+    );
+
+    // All-or-nothing behavior.
+    if (missingUuids.length > 0) {
+      throw new AppError(
+        `Gateway(s) not found: ${missingUuids.join(", ")}`,
+        404,
+      );
+    }
+
+    // Set the requested status. Do not invert the current value.
+    // This makes repeated start/stop requests idempotent.
+    await connection.execute(
+      `UPDATE gateways
+       SET status = ?
+       WHERE gateway_uuid IN (${placeholders})`,
+      [enabledValue, ...gatewayUuids],
+    );
+
+    // Retrieve the final status of every requested gateway.
+    const [updatedRows] = await connection.execute<GatewayStatusRow[]>(
+      `SELECT gateway_uuid, status
+         FROM gateways
+         WHERE gateway_uuid IN (${placeholders})
+         ORDER BY gateway_uuid`,
+      gatewayUuids,
+    );
+
+    if (updatedRows.length !== gatewayUuids.length) {
+      throw new AppError(
+        "Unable to retrieve all updated gateway statuses",
+        500,
+      );
+    }
+
+    await connection.commit();
+    transactionStarted = false;
+
+    return {
+      action,
+      enabled: Boolean(enabledValue),
+      totalRequested: gatewayUuids.length,
+      totalUpdated: updatedRows.length,
+      gateways: updatedRows.map((gateway) => ({
+        gateway_uuid: gateway.gateway_uuid,
+        status: gateway.status === 1 ? "Started" : "Stopped",
+      })),
+    };
+  } catch (error) {
+    if (transactionStarted) {
+      try {
+        await connection.rollback();
+      } catch (rollbackError) {
+        console.error("Gateway status update rollback failed:", rollbackError);
+      }
+    }
+
+    throw error;
+  } finally {
+    connection.release();
+  }
+};
+
+export const toggleGatewayEnableService = async (
+  gatewayUuids: string[],
+): Promise<GatewayEnabledToggleResponse> => {
+  const connection = await pool.getConnection();
+
+  let transactionStarted = false;
+
+  try {
+    await connection.beginTransaction();
+    transactionStarted = true;
+
+    const placeholders = gatewayUuids.map(() => "?").join(", ");
+
+    // Verify all requested gateways exist.
+    const [existingRows] = await connection.execute<GatewayStatusRow[]>(
+      `SELECT gateway_uuid
+       FROM gateways
+       WHERE gateway_uuid IN (${placeholders})
+       FOR UPDATE`,
+      gatewayUuids,
+    );
+
+    if (existingRows.length !== gatewayUuids.length) {
+      throw new AppError("One or more gateways were not found", 404);
+    }
+
+    // Toggle enabled using MySQL boolean logic.
+    const [updateResult] = await connection.execute<ResultSetHeader>(
+      `UPDATE gateways
+   SET enabled = IF(enabled = 1, 0, 1)
+   WHERE gateway_uuid IN (${placeholders})`,
+      gatewayUuids,
+    );
+
+    if (updateResult.affectedRows !== gatewayUuids.length) {
+      throw new AppError("Unable to toggle all gateway statuses", 500);
+    }
+
+    // Retrieve updated statuses.
+    const [updatedRows] = await connection.execute<GatewayStatusRow[]>(
+      `SELECT gateway_uuid, enabled
+       FROM gateways
+       WHERE gateway_uuid IN (${placeholders})`,
+      gatewayUuids,
+    );
+
+    await connection.commit();
+    transactionStarted = false;
+
+    return {
+      totalUpdated: updatedRows.length,
+      gateways: updatedRows.map((gateway) => ({
+        gateway_uuid: gateway.gateway_uuid,
+        enabled: Boolean(gateway.enabled),
+      })),
+    };
+  } catch (error) {
+    if (transactionStarted) {
+      try {
+        await connection.rollback();
+      } catch (rollbackError) {
+        console.error("Gateway toggle rollback failed:", rollbackError);
+      }
+    }
+
+    throw error;
+  } finally {
+    connection.release();
+  }
+};

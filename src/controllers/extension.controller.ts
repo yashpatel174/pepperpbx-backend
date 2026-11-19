@@ -3,78 +3,16 @@ import type { Request, Response } from "express";
 import {
   createExtensionService,
   deleteExtensionService,
+  getCopyExtensionService,
   getExtensionService,
   getExtensionsService,
+  toggleBulkExtensionStatus,
   updateExtensionService,
   updateExtensionStatus,
 } from "../services/extension.service";
 import { ExtensionListQuery, ExtensionPayload } from "../types/extension.types";
 import { EXTENSION_COLUMNS } from "../utils/columns";
-
-const handleError = (res: Response, error: unknown): Response => {
-  // Handle MySQL duplicate entry errors.
-  if (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    error.code === "ER_DUP_ENTRY"
-  ) {
-    return res.status(409).json({
-      success: false,
-      message: "Extension already exists under this user context",
-    });
-  }
-
-  // Handle custom application errors.
-  if (error instanceof Error) {
-    const message = error.message;
-
-    if (message === "Extension already exists under this user context") {
-      return res.status(409).json({
-        success: false,
-        message,
-      });
-    }
-
-    if (message === "Extension not found") {
-      return res.status(404).json({
-        success: false,
-        message,
-      });
-    }
-
-    // Validation errors.
-    const validationErrors = [
-      "Extension UUID is required",
-      "Valid payload is required",
-      "Extension is required",
-      "User context is required",
-      "Account code is required",
-    ];
-
-    if (
-      validationErrors.includes(message) ||
-      message.startsWith("Invalid fields:")
-    ) {
-      return res.status(400).json({
-        success: false,
-        message,
-      });
-    }
-
-    // Return other application errors.
-    return res.status(500).json({
-      success: false,
-      message,
-    });
-  }
-
-  // Handle unexpected errors.
-  return res.status(500).json({
-    success: false,
-    message: "Internal server error",
-  });
-};
+import { handleError } from "../utils/AppError";
 
 export const createExtension = async (
   req: Request,
@@ -95,6 +33,17 @@ export const createExtension = async (
   } catch (error: unknown) {
     return handleError(res, error);
   }
+};
+
+export const copyExtension = async (req: Request, res: Response) => {
+  const { extension_uuid, new_extension } = req.body;
+
+  const result = await getCopyExtensionService(extension_uuid, new_extension);
+  return res.status(201).json({
+    success: true,
+    message: "Extension copied successfully",
+    data: result,
+  });
 };
 
 export const getExtensions = async (
@@ -120,14 +69,18 @@ export const getExtensions = async (
 
     const showAll = req.query.showAll === "true";
 
+    const domain =
+      typeof req.query.domain === "string" ? req.query.domain.trim() : "";
+
     const query: ExtensionListQuery = {
       page,
       pageSize,
       search,
       showAll,
+      domain,
     };
 
-    const result = await getExtensionsService(query as any);
+    const result = await getExtensionsService(query);
 
     return res.status(200).json({
       success: true,
@@ -191,8 +144,7 @@ export const updateExtension = async (
   res: Response,
 ): Promise<Response> => {
   try {
-    const { extension_uuid } = req.params;
-    const payload = req.body as Partial<ExtensionPayload>;
+    const { extension_uuid, updated } = req.body as Partial<ExtensionPayload>;
 
     if (!extension_uuid?.trim()) {
       return res.status(400).json({
@@ -201,7 +153,7 @@ export const updateExtension = async (
       });
     }
 
-    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    if (!updated || typeof updated !== "object" || Array.isArray(updated)) {
       return res.status(400).json({
         success: false,
         message: "A valid update payload is required",
@@ -213,27 +165,29 @@ export const updateExtension = async (
     for (const column of EXTENSION_COLUMNS) {
       if (
         column === "range" ||
-        !Object.prototype.hasOwnProperty.call(payload, column)
+        column === "user_context" ||
+        !Object.prototype.hasOwnProperty.call(updated, column)
       ) {
         continue;
       }
 
-      const value = payload[column];
+      const value = updated[column];
 
       if (value === undefined) {
         continue;
       }
 
       // The extension is editable but cannot be blank.
+      const extensionValue = String(value ?? "").trim();
       if (column === "extension") {
-        if (typeof value !== "string" || value.trim() === "") {
+        if (typeof value !== "string" || !extensionValue) {
           return res.status(400).json({
             success: false,
             message: "Extension must be a non-empty string",
           });
         }
 
-        normalizedPayload.extension = value.trim();
+        normalizedPayload.extension = String(value ?? "").trim();
         continue;
       }
 
@@ -244,7 +198,7 @@ export const updateExtension = async (
       }
 
       // Clear blank strings on nullable fields.
-      if (typeof value === "string" && value.trim() === "") {
+      if (typeof value === "string" && !extensionValue) {
         normalizedPayload[column] = null;
         continue;
       }
@@ -274,20 +228,32 @@ export const updateExtension = async (
   }
 };
 
-export const extensionStatusToggle = async (req: Request, res: Response) => {
+export const enableExtension = async (req: Request, res: Response) => {
   try {
     const { extension_uuid } = req.params;
     const { enabled } = req.body;
-    const result = await updateExtensionStatus(String(extension_uuid), enabled);
+    await updateExtensionStatus(String(extension_uuid), enabled);
 
     res.status(200).json({
       success: true,
       message: `Extension ${enabled ? "enabled" : "disabled"} successfully`,
-      data: result,
     });
   } catch (error) {
     return handleError(res, error);
   }
+};
+
+export const bulkExtensionStatus = async (
+  req: Request,
+  res: Response,
+): Promise<Response> => {
+  const result = await toggleBulkExtensionStatus(req.body);
+
+  return res.status(200).json({
+    success: true,
+    message: "Extension statuses updated successfully",
+    data: result,
+  });
 };
 
 export const deleteExtension = async (

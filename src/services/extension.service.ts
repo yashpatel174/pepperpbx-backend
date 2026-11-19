@@ -1,7 +1,7 @@
-import type {
-  PoolConnection,
-  ResultSetHeader,
-  RowDataPacket,
+import {
+  type PoolConnection,
+  type ResultSetHeader,
+  type RowDataPacket,
 } from "mysql2/promise";
 import pool from "../config/db";
 import {
@@ -11,7 +11,9 @@ import {
   ExtensionListResult,
   ExtensionPayload,
   ExtensionRow,
+  ToggleExtensionStatusPayload,
 } from "../types/extension.types";
+import { AppError } from "../utils/AppError";
 import { EXTENSION_COLUMNS } from "../utils/columns";
 
 const TABLE = "`extensions`";
@@ -19,16 +21,18 @@ const TABLE = "`extensions`";
 export const createExtensionService = async (
   payload: ExtensionPayload,
 ): Promise<CreateExtensionResult> => {
-  // 1. Validate user_context.
-  const userContext =
-    typeof payload.user_context === "string" ? payload.user_context.trim() : "";
+  const [domain] = await pool.execute<RowDataPacket[]>(
+    "SELECT * FROM domains WHERE domain = ?",
+    [payload.user_context],
+  );
 
-  if (!userContext) {
-    throw new Error("User context is required");
+  if (domain.length === 0) {
+    throw new AppError("Domain not found");
   }
 
-  if (userContext.length > 100) {
-    throw new Error("User context cannot exceed 100 characters");
+  const userContext = Number(domain?.[0]?.id);
+  if (!userContext) {
+    throw new AppError("User context is required");
   }
 
   // 2. Validate extension and range.
@@ -49,7 +53,7 @@ export const createExtensionService = async (
     !Number.isSafeInteger(range) ||
     range < 1
   ) {
-    throw new Error("Invalid extension or range");
+    throw new AppError("Invalid extension or range");
   }
 
   // 3. Select columns.
@@ -65,11 +69,11 @@ export const createExtensionService = async (
 
   // 4. Validate required fields.
   if (!columns.includes("extension")) {
-    throw new Error("Extension column is required");
+    throw new AppError("Extension column is required");
   }
 
   if (!columns.includes("user_context")) {
-    throw new Error("User context column is required");
+    throw new AppError("User context column is required");
   }
 
   const accountcode =
@@ -85,7 +89,7 @@ export const createExtensionService = async (
     !Number.isSafeInteger(Number(accountcode)) ||
     Number(accountcode) < 0
   ) {
-    throw new Error("Valid accountcode is required");
+    throw new AppError("Valid accountcode is required");
   }
 
   const normalizedAccountcode = Number(accountcode);
@@ -158,7 +162,7 @@ export const createExtensionService = async (
     );
 
     if (extensions.length !== 1) {
-      throw new Error("Failed to retrieve created extension");
+      throw new AppError("Failed to retrieve created extension");
     }
 
     // 12. Commit transaction.
@@ -184,10 +188,85 @@ export const createExtensionService = async (
   }
 };
 
+export const getCopyExtensionService = async (
+  extension_uuid: string,
+  new_extension: string,
+) => {
+  if (!extension_uuid?.trim()) {
+    throw new AppError("Extension UUID is required", 400);
+  }
+
+  if (!new_extension?.trim()) {
+    throw new AppError("New extension is required", 400);
+  }
+
+  const [result] = await pool.execute<RowDataPacket[]>(
+    `SELECT * FROM extensions WHERE extension_uuid = ? LIMIT 1`,
+    [extension_uuid],
+  );
+
+  if (!result.length) {
+    throw new AppError("Original extension not found", 404);
+  }
+
+  // Check whether new extension already exists
+  const [existingExtension] = await pool.execute<RowDataPacket[]>(
+    `SELECT extension_uuid
+   FROM extensions
+   WHERE extension = ? AND user_context = ?
+   LIMIT 1`,
+    [new_extension, result[0].user_context],
+  );
+
+  if (existingExtension.length > 0) {
+    throw new AppError(
+      "This extension already exists for this user context",
+      409,
+    );
+  }
+
+  // Generate UUID for the new extension
+  const new_extension_uuid = crypto.randomUUID();
+
+  const selectColumns = EXTENSION_COLUMNS.map((column) => {
+    if (column === "extension") {
+      return "? AS extension";
+    }
+    return `\`${column}\``;
+  });
+
+  const query = `
+    INSERT INTO extensions (
+      extension_uuid,
+      ${EXTENSION_COLUMNS.map((column) => `\`${column}\``).join(", ")}
+    )
+    SELECT
+      ?,
+      ${selectColumns.join(", ")}
+    FROM extensions
+    WHERE extension_uuid = ?
+    LIMIT 1
+  `;
+
+  await pool.execute(query, [
+    new_extension_uuid,
+    new_extension,
+    extension_uuid,
+  ]);
+
+  // Fetch newly created record
+  const [new_record] = await pool.execute<RowDataPacket[]>(
+    `SELECT * FROM extensions WHERE extension_uuid = ?`,
+    [new_extension_uuid],
+  );
+
+  return new_record[0];
+};
+
 export const getExtensionsService = async (
   query: ExtensionListQuery,
 ): Promise<ExtensionListResult> => {
-  const { page, pageSize, search } = query;
+  const { page, pageSize, search, showAll, domain } = query;
 
   const offset = (page - 1) * pageSize;
 
@@ -207,36 +286,84 @@ export const getExtensionsService = async (
   ];
 
   const searchCondition = search
-    ? `WHERE (${searchableColumns
-        .map((column) => `\`${column}\` LIKE ?`)
+    ? `(${searchableColumns
+        .map((column) => `e.\`${column}\` LIKE ?`)
         .join(" OR ")})`
     : "";
 
   const searchValues = search ? searchableColumns.map(() => `%${search}%`) : [];
 
+  let domainCondition = "";
+  let domainValues: (string | number)[] = [];
+
+  // Validate domain only when showAll is false.
+  if (!showAll) {
+    if (!domain) {
+      throw new AppError("Domain is required", 400);
+    }
+
+    const [domainRows] = await pool.execute<(RowDataPacket & { id: number })[]>(
+      `SELECT id FROM domains WHERE domain = ? LIMIT 1`,
+      [domain],
+    );
+
+    if (!domainRows.length) {
+      return {
+        data: [],
+        page,
+        pageSize,
+        total_records: 0,
+        total_pages: 0,
+      };
+    }
+
+    domainCondition = "e.user_context = ?";
+    domainValues = [domainRows[0].id];
+  }
+
+  const conditions = [
+    ...(domainCondition ? [domainCondition] : []),
+    ...(searchCondition ? [searchCondition] : []),
+  ];
+
+  const whereCondition = conditions.length
+    ? `WHERE ${conditions.join(" AND ")}`
+    : "";
+
+  const values = [...domainValues, ...searchValues];
+
+  // Count query
   const [countRows] = await pool.execute<(RowDataPacket & { total: number })[]>(
-    `SELECT COUNT(*) AS total FROM ${TABLE} ${searchCondition}`,
-    searchValues,
+    `
+      SELECT COUNT(*) AS total
+      FROM ${TABLE} e
+      ${whereCondition}
+    `,
+    values,
   );
 
   const total_records = Number(countRows[0]?.total ?? 0);
   const total_pages = Math.ceil(total_records / pageSize);
 
+  // Fetch extensions
   const [rows] = await pool.execute<ExtensionRow[]>(
     `
-    SELECT *
-    FROM ${TABLE}
-    ${searchCondition}
-    ORDER BY extension ASC
-    LIMIT ? OFFSET ?
-  `,
-    [...searchValues, pageSize, offset],
+      SELECT
+        e.*,
+        d.domain AS domain_name
+      FROM ${TABLE} e
+      LEFT JOIN domains d
+        ON e.user_context = d.id
+      ${whereCondition}
+      ORDER BY e.extension ASC
+      LIMIT ? OFFSET ?
+    `,
+    [...values, pageSize, offset],
   );
 
   const data: ExtensionRow[] = rows.map((row) => ({
     ...row,
     extension_uuid: row.extension_uuid,
-    domain_name: row.user_context,
     limit_max:
       row.limit_max == null || row.limit_max === ""
         ? "0"
@@ -250,6 +377,7 @@ export const getExtensionsService = async (
         ? null
         : String(row.sip_force_expires),
     default: "false",
+    status: row.status === "active" ? "enabled" : "disabled",
   }));
 
   return {
@@ -265,11 +393,19 @@ export const getExtensionService = async (
   extension: string,
 ): Promise<ExtensionRow | null> => {
   const [rows] = await pool.execute<ExtensionRow[]>(
-    `SELECT * FROM ${TABLE} WHERE extension_uuid = ? LIMIT 1`,
+    `SELECT 
+      extensions.*,
+      domains.domain
+   FROM ${TABLE} AS extensions
+   LEFT JOIN domains 
+      ON extensions.user_context = domains.id
+   WHERE extensions.extension_uuid = ?
+   LIMIT 1`,
     [extension],
   );
 
-  return rows[0] ?? null;
+  const data = { ...rows[0], user_context: rows[0].domain };
+  return data ?? null;
 };
 
 export const updateExtensionService = async (
@@ -277,27 +413,20 @@ export const updateExtensionService = async (
   payload: Partial<ExtensionPayload>,
 ): Promise<ResultSetHeader> => {
   if (!extension_uuid?.trim()) {
-    throw new Error("Extension UUID is required");
+    throw new AppError("Extension UUID is required");
   }
 
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-    throw new Error("Valid payload is required");
+    throw new AppError("Valid payload is required");
   }
 
   // 1. Validate required fields.
   if (typeof payload.extension !== "string" || !payload.extension.trim()) {
-    throw new Error("Extension is required");
-  }
-
-  if (
-    typeof payload.user_context !== "string" ||
-    !payload.user_context.trim()
-  ) {
-    throw new Error("User context is required");
+    throw new AppError("Extension is required");
   }
 
   if (payload.accountcode === undefined || payload.accountcode === null) {
-    throw new Error("Account code is required");
+    throw new AppError("Account code is required");
   }
 
   // 2. Reject unexpected fields.
@@ -308,12 +437,11 @@ export const updateExtensionService = async (
   );
 
   if (invalidFields.length > 0) {
-    throw new Error(`Invalid fields: ${invalidFields.join(", ")}`);
+    throw new AppError(`Invalid fields: ${invalidFields.join(", ")}`);
   }
 
   // 3. Normalize unique fields.
   const extension = payload.extension.trim();
-  const userContext = payload.user_context.trim();
 
   // 4. Check whether the extension already exists
   //    under the same user_context, excluding the current record.
@@ -321,28 +449,27 @@ export const updateExtensionService = async (
     `
       SELECT extension_uuid
       FROM ${TABLE}
-      WHERE user_context = ?
-        AND extension = ?
+      WHERE extension = ?
         AND extension_uuid <> ?
       LIMIT 1
     `,
-    [userContext, extension, extension_uuid],
+    [extension, extension_uuid],
   );
 
   if (existingExtensions.length > 0) {
-    throw new Error("Extension already exists under this user context");
+    throw new AppError("Extension already exists under this user context");
   }
 
   // 5. Preserve existing update behavior:
   //    Missing/undefined fields become NULL.
   //    Explicit false, 0, and null are preserved.
-  const values = EXTENSION_COLUMNS.map((column) => {
+  const updateColumns = EXTENSION_COLUMNS.filter(
+    (column) => column !== "user_context",
+  );
+
+  const values = updateColumns.map((column) => {
     if (column === "extension") {
       return extension;
-    }
-
-    if (column === "user_context") {
-      return userContext;
     }
 
     const value = payload[column];
@@ -351,9 +478,9 @@ export const updateExtensionService = async (
   });
 
   // 6. Generate UPDATE query.
-  const setClause = EXTENSION_COLUMNS.map((column) => `\`${column}\` = ?`).join(
-    ", ",
-  );
+  const setClause = updateColumns
+    .map((column) => `\`${column}\` = ?`)
+    .join(", ");
 
   const sql = `
     UPDATE ${TABLE}
@@ -370,7 +497,7 @@ export const updateExtensionService = async (
     ]);
 
     if (result.affectedRows === 0) {
-      throw new Error("Extension not found");
+      throw new AppError("Extension not found");
     }
 
     return result;
@@ -382,7 +509,7 @@ export const updateExtensionService = async (
       "code" in error &&
       error.code === "ER_DUP_ENTRY"
     ) {
-      throw new Error("Extension already exists under this user context");
+      throw new AppError("Extension already exists under this user context");
     }
 
     throw error;
@@ -393,7 +520,7 @@ export const deleteExtensionService = async (
   extensions: string[],
 ): Promise<ResultSetHeader> => {
   if (extensions.length === 0) {
-    throw new Error("At least one extension UUID is required");
+    throw new AppError("At least one extension UUID is required");
   }
 
   const placeholders = extensions.map(() => "?").join(", ");
@@ -409,13 +536,13 @@ export const deleteExtensionService = async (
 export const updateExtensionStatus = async (
   extensionUuid: string,
   enabled: boolean,
-): Promise<ResultSetHeader> => {
+): Promise<void> => {
   if (!extensionUuid?.trim()) {
-    throw new Error("Extension UUID is required");
+    throw new AppError("Extension UUID is required");
   }
 
   if (typeof enabled !== "boolean") {
-    throw new Error("Enabled must be a boolean");
+    throw new AppError("Enabled must be a boolean");
   }
 
   const sql = `
@@ -441,9 +568,83 @@ export const updateExtensionStatus = async (
     );
 
     if (rows.length === 0) {
-      throw new Error("Extension not found");
+      throw new AppError("Extension not found");
     }
   }
 
-  return result;
+  return;
+};
+
+export const toggleBulkExtensionStatus = async (
+  payload: ToggleExtensionStatusPayload,
+) => {
+  if (!Array.isArray(payload) || payload.length === 0) {
+    throw new AppError("Extension UUID is required", 400);
+  }
+
+  if (payload.some((uuid) => typeof uuid !== "string" || uuid.trim() === "")) {
+    throw new AppError("Valid payload is required", 400);
+  }
+
+  const uniqueUuids = [...new Set(payload)];
+
+  const connection: PoolConnection = await pool.getConnection();
+
+  try {
+    await connection.beginTransaction();
+
+    const placeholders = uniqueUuids.map(() => "?").join(", ");
+
+    // Lock matching records before updating.
+    const [existingExtensions] = await connection.query(
+      `
+      SELECT extension_uuid, enabled
+      FROM extensions
+      WHERE extension_uuid IN (${placeholders})
+      FOR UPDATE
+      `,
+      uniqueUuids,
+    );
+
+    const extensions = existingExtensions as {
+      extension_uuid: string;
+      enabled: string;
+    }[];
+
+    if (extensions.length !== uniqueUuids.length) {
+      throw new AppError("Extension not found", 404);
+    }
+
+    await connection.query<ResultSetHeader>(
+      `
+  UPDATE extensions
+  SET enabled = CASE
+    WHEN enabled = 1 THEN 0
+    WHEN enabled = 0 THEN 1
+    ELSE enabled
+  END
+  WHERE extension_uuid IN (${placeholders})
+  `,
+      uniqueUuids,
+    );
+
+    // Fetch updated records.
+    const [updatedExtensions] = await connection.query(
+      `
+      SELECT extension_uuid, enabled
+      FROM extensions
+      WHERE extension_uuid IN (${placeholders})
+      `,
+      uniqueUuids,
+    );
+
+    await connection.commit();
+
+    return updatedExtensions;
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
 };

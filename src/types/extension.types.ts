@@ -1,10 +1,16 @@
 import { ResultSetHeader, RowDataPacket } from "mysql2/promise";
 
+export interface DomainRow extends RowDataPacket {
+  id: number;
+  domain: string;
+}
+
 export interface ExtensionListQuery {
   page: number;
   pageSize: number;
   search: string;
   showAll: boolean;
+  domain?: string;
 }
 
 export interface ExtensionListResult {
@@ -35,6 +41,8 @@ export interface CreateExtensionResult {
 
 export interface ExtensionPayload {
   absolute_codec_string?: string | null;
+  extension_uuid?: string;
+  updated?: boolean;
   accountcode: string;
   auth_acl?: string | null;
   call_group?: string | null;
@@ -79,3 +87,7 @@ export interface ExtensionPayload {
 }
 
 export interface ExtensionRow extends RowDataPacket, ExtensionPayload {}
+
+export interface ToggleExtensionStatusPayload {
+  extensionUuids: string[];
+}
