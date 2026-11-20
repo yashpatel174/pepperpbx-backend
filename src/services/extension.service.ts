@@ -53,7 +53,7 @@ export const createExtensionService = async (
     !Number.isSafeInteger(range) ||
     range < 1
   ) {
-    throw new AppError("Invalid extension or range");
+    throw new AppError("Valid extension number and range are required");
   }
 
   // 3. Select columns.
@@ -162,7 +162,7 @@ export const createExtensionService = async (
     );
 
     if (extensions.length !== 1) {
-      throw new AppError("Failed to retrieve created extension");
+      throw new AppError("Failed to create extension");
     }
 
     // 12. Commit transaction.
@@ -197,7 +197,7 @@ export const getCopyExtensionService = async (
   }
 
   if (!new_extension?.trim()) {
-    throw new AppError("New extension is required", 400);
+    throw new AppError("New extension number is required", 400);
   }
 
   const [result] = await pool.execute<RowDataPacket[]>(
@@ -206,7 +206,7 @@ export const getCopyExtensionService = async (
   );
 
   if (!result.length) {
-    throw new AppError("Original extension not found", 404);
+    throw new AppError("Extension not found", 404);
   }
 
   // Check whether new extension already exists
@@ -219,10 +219,7 @@ export const getCopyExtensionService = async (
   );
 
   if (existingExtension.length > 0) {
-    throw new AppError(
-      "This extension already exists for this user context",
-      409,
-    );
+    throw new AppError("Extension already exists under this user context", 409);
   }
 
   // Generate UUID for the new extension
@@ -422,7 +419,7 @@ export const updateExtensionService = async (
 
   // 1. Validate required fields.
   if (typeof payload.extension !== "string" || !payload.extension.trim()) {
-    throw new AppError("Extension is required");
+    throw new AppError("Extension number is required");
   }
 
   if (payload.accountcode === undefined || payload.accountcode === null) {
@@ -456,7 +453,7 @@ export const updateExtensionService = async (
     [extension, extension_uuid],
   );
 
-  if (existingExtensions.length > 0) {
+  if (existingExtensions.length > 1) {
     throw new AppError("Extension already exists under this user context");
   }
 
@@ -520,7 +517,7 @@ export const deleteExtensionService = async (
   extensions: string[],
 ): Promise<ResultSetHeader> => {
   if (extensions.length === 0) {
-    throw new AppError("At least one extension UUID is required");
+    throw new AppError("At least one extension UUID must be provided");
   }
 
   const placeholders = extensions.map(() => "?").join(", ");
@@ -542,7 +539,7 @@ export const updateExtensionStatus = async (
   }
 
   if (typeof enabled !== "boolean") {
-    throw new AppError("Enabled must be a boolean");
+    throw new AppError("Enabled must be a valid boolean value");
   }
 
   const sql = `
@@ -579,11 +576,11 @@ export const toggleBulkExtensionStatus = async (
   payload: ToggleExtensionStatusPayload,
 ) => {
   if (!Array.isArray(payload) || payload.length === 0) {
-    throw new AppError("Extension UUID is required", 400);
+    throw new AppError("At least one extension UUID must be provided", 400);
   }
 
   if (payload.some((uuid) => typeof uuid !== "string" || uuid.trim() === "")) {
-    throw new AppError("Valid payload is required", 400);
+    throw new AppError("Valid extension UUIDs are required", 400);
   }
 
   const uniqueUuids = [...new Set(payload)];

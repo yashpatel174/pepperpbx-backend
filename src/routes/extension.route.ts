@@ -10,8 +10,11 @@ import {
   bulkExtensionStatus,
 } from "../controllers/extension.controller.js";
 import { asyncHandler } from "../middleware/asyncHandler.js";
+import { setErrorModule } from "../middleware/errorContext.middleware.js";
 
 const router = Router();
+
+router.use(setErrorModule("extensions"));
 
 router.post("/create", asyncHandler(createExtension));
 router.post("/copy", asyncHandler(copyExtension));

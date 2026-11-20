@@ -1,4 +1,6 @@
 import { Response } from "express";
+import { getDuplicateMessage } from "../constants/error.constants";
+import type { ErrorModule } from "../constants/error.constants";
 
 export class AppError extends Error {
   public readonly statusCode: number;
@@ -12,6 +14,30 @@ export class AppError extends Error {
     this.isOperational = isOperational;
 
     Error.captureStackTrace?.(this, this.constructor);
+  }
+
+  static duplicate(module: ErrorModule): AppError {
+    return new AppError(getDuplicateMessage(module), 409);
+  }
+
+  static notFound(entity: string): AppError {
+    return new AppError(`${entity} not found`, 404);
+  }
+
+  static validation(message: string): AppError {
+    return new AppError(message, 400);
+  }
+
+  static unauthorized(message = "Unauthorized access"): AppError {
+    return new AppError(message, 401);
+  }
+
+  static forbidden(message = "Access denied"): AppError {
+    return new AppError(message, 403);
+  }
+
+  static conflict(message: string): AppError {
+    return new AppError(message, 409);
   }
 }
 

@@ -587,3 +587,56 @@ export const validateGatewayToggle = (
     gatewayUuids: normalizedUuids,
   };
 };
+
+export const validateGatewayDelete = (
+  payload: unknown,
+): GatewayTogglePayload => {
+  if (
+    typeof payload !== "object" ||
+    payload === null ||
+    Array.isArray(payload)
+  ) {
+    throw new AppError("Valid request payload is required", 400);
+  }
+
+  const input = payload as Record<string, unknown>;
+
+  if (Object.keys(input).some((key) => key !== "gatewayUuids")) {
+    throw new AppError("Unknown request field", 400);
+  }
+
+  if (!Array.isArray(input.gatewayUuids)) {
+    throw new AppError("gatewayUuids must be an array", 400);
+  }
+
+  const gatewayUuids = input.gatewayUuids;
+
+  if (
+    gatewayUuids.length === 0 ||
+    gatewayUuids.length > MAX_GATEWAYS_PER_REQUEST
+  ) {
+    throw new AppError(
+      `gatewayUuids must contain between 1 and ${MAX_GATEWAYS_PER_REQUEST} UUIDs`,
+      400,
+    );
+  }
+
+  if (
+    !gatewayUuids.every(
+      (uuid): uuid is string =>
+        typeof uuid === "string" && UUID_REGEX.test(uuid),
+    )
+  ) {
+    throw new AppError("One or more gateway UUIDs are invalid", 400);
+  }
+
+  const normalizedUuids = gatewayUuids.map((uuid) => uuid.toLowerCase());
+
+  if (new Set(normalizedUuids).size !== normalizedUuids.length) {
+    throw new AppError("Duplicate gateway UUIDs are not allowed", 400);
+  }
+
+  return {
+    gatewayUuids: normalizedUuids,
+  };
+};

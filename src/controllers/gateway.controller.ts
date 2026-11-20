@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import {
   createGatewayService,
+  deleteGatewayService,
   getGatewayDetailsService,
   getGatewaysService,
   toggleGatewayEnableService,
@@ -9,6 +10,7 @@ import {
 } from "../services/gateway.service";
 import {
   validateCreateGateway,
+  validateGatewayDelete,
   validateGatewayListQuery,
   validateGatewayStatusToggle,
   validateGatewayToggle,
@@ -38,10 +40,15 @@ export const getGateways = async (
   res: Response,
 ): Promise<void> => {
   const filters = validateGatewayListQuery(
-    req.query as Record<string, unknown>,
+    req.params as Record<string, unknown>,
   );
 
-  const result = await getGatewaysService(filters);
+  const showAll = req.query.showAll === "true";
+
+  const domain =
+    typeof req.query.domain === "string" ? req.query.domain.trim() : "";
+
+  const result = await getGatewaysService(filters, showAll, domain);
 
   res.status(200).json({
     success: true,
@@ -116,6 +123,21 @@ export const toggleGatewayEnableStatus = async (
   res.status(200).json({
     success: true,
     message: "Gateway statuses toggled successfully",
+    data: result,
+  });
+};
+
+export const deleteGateway = async (
+  req: Request,
+  res: Response,
+): Promise<void> => {
+  const { gatewayUuids } = validateGatewayDelete(req.body);
+
+  const result = await deleteGatewayService(gatewayUuids);
+
+  res.status(200).json({
+    success: true,
+    message: "Gateways deleted successfully",
     data: result,
   });
 };

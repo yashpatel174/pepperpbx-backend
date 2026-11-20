@@ -1,6 +1,7 @@
 import { Router } from "express";
 import {
   createGateway,
+  deleteGateway,
   getGatewayDetails,
   getGateways,
   toggleGatewayEnableStatus,
@@ -8,14 +9,18 @@ import {
   updateGateway,
 } from "../controllers/gateway.controller";
 import { asyncHandler } from "../middleware/asyncHandler";
+import { setErrorModule } from "../middleware/errorContext.middleware";
 
 const router = Router();
 
-router.post("/", asyncHandler(createGateway));
-router.get("/", asyncHandler(getGateways));
-router.patch("/toggle-status", asyncHandler(toggleGatewayStatus));
-router.patch("/toggle-enabled-status", asyncHandler(toggleGatewayEnableStatus));
-router.get("/:gateway_uuid", asyncHandler(getGatewayDetails));
-router.patch("/:gateway_uuid", asyncHandler(updateGateway));
+router.use(setErrorModule("gateway"));
+
+router.post("/create", asyncHandler(createGateway));
+router.get("/list", asyncHandler(getGateways));
+router.patch("/startStop", asyncHandler(toggleGatewayStatus));
+router.patch("/toggle", asyncHandler(toggleGatewayEnableStatus));
+router.get("/details/:gateway_uuid", asyncHandler(getGatewayDetails));
+router.patch("/update/:gateway_uuid", asyncHandler(updateGateway));
+router.delete("/delete", asyncHandler(deleteGateway));
 
 export default router;

@@ -9,6 +9,7 @@ import {
   CreatedGateway,
   CreateGatewayResult,
   GatewayAction,
+  GatewayDeleteResponse,
   GatewayDetails,
   GatewayDetailsResponse,
   GatewayEnabledToggleResponse,
@@ -19,6 +20,7 @@ import {
   GatewayRow,
   GatewayStatusRow,
   GatewayToggleResponse,
+  GatewayUuidRow,
   UPDATE_COLUMNS,
   UpdatedGatewayResponse,
   UpdatedGatewayRow,
@@ -64,6 +66,20 @@ const ALLOWED_COLUMNS = new Set<keyof GatewayPayload>([
 export const createGatewayService = async (
   payload: GatewayPayload,
 ): Promise<CreateGatewayResult> => {
+  const [domain] = await pool.execute<RowDataPacket[]>(
+    "SELECT * FROM domains WHERE domain = ?",
+    [payload.domain_name],
+  );
+
+  if (domain.length === 0) {
+    throw new AppError("Domain not found");
+  }
+
+  const domain_name = Number(domain?.[0]?.id);
+  if (!domain_name) {
+    throw new AppError("Domain name is required");
+  }
+
   const columns = Object.keys(payload).filter((column) =>
     ALLOWED_COLUMNS.has(column as keyof GatewayPayload),
   );
@@ -73,9 +89,12 @@ export const createGatewayService = async (
   }
 
   // Preserve false, zero, empty strings and null.
-  const values = columns.map(
-    (column) => payload[column as keyof GatewayPayload],
-  );
+  const values = columns.map((column) => {
+    if (column === "domain_name") {
+      return domain_name;
+    }
+    return payload[column as keyof GatewayPayload];
+  });
 
   const columnNames = columns.map((column) => `\`${column}\``).join(", ");
 
@@ -148,6 +167,8 @@ const escapeLike = (value: string): string => value.replace(/[\\%_]/g, "\\$&");
 
 export const getGatewaysService = async (
   filters: GatewayListQuery,
+  showAll: boolean,
+  domain: string,
 ): Promise<GatewayListResult> => {
   const { page, pageSize, search } = filters;
 
@@ -158,7 +179,42 @@ export const getGatewaysService = async (
   }
 
   const whereConditions: string[] = [];
-  const whereValues: string[] = [];
+  const whereValues: (string | number)[] = [];
+
+  // Resolve domain ID and filter gateways only when showAll is false.
+  if (!showAll) {
+    if (!domain) {
+      throw new AppError("Domain is required", 400);
+    }
+
+    const [domainRows] = await pool.execute<(RowDataPacket & { id: number })[]>(
+      `
+        SELECT id
+        FROM domains
+        WHERE domain = ?
+        LIMIT 1
+      `,
+      [domain],
+    );
+
+    if (!domainRows.length) {
+      return {
+        gateways: [],
+        pagination: {
+          currentPage: page,
+          pageSize,
+          totalRecords: 0,
+          totalPages: 0,
+          hasNextPage: false,
+          hasPreviousPage: false,
+        },
+      };
+    }
+
+    // gateways.domain_name stores domains.id.
+    whereConditions.push("domain_name = ?");
+    whereValues.push(domainRows[0].id);
+  }
 
   if (search) {
     const searchPattern = `${escapeLike(search)}%`;
@@ -194,50 +250,51 @@ export const getGatewaysService = async (
     );
 
     const totalRecords = Number(countRows[0]?.totalRecords ?? 0);
-
     const totalPages = Math.ceil(totalRecords / pageSize);
 
     const [rows] = await connection.execute<GatewayRow[]>(
       `
         SELECT
-          id,
-          gateway_uuid,
-          gateway,
-          username,
-          from_user,
-          domain_name,
-          sbcDomainIp,
-          proxy,
-          realm,
-          expire_seconds,
-          retry_seconds,
-          context,
-          profile,
-          register,
-          enabled,
-          status,
-          description,
-          auth_username,
-          extension,
-          register_transport,
-          register_proxy,
-          outbound_proxy,
-          sip_cid_type,
-          codec_prefs,
-          ping,
-          ping_min,
-          ping_max,
-          channels,
-          hostname,
-          distinct_to,
-          caller_id_in_from,
-          supress_cng,
-          extension_in_contact,
-          created_at,
-          updated_at
-        FROM ${TABLE}
+          g.id,
+          g.gateway_uuid,
+          g.username,
+          g.gateway,
+          d.domain AS domain_name,
+          g.from_user,
+          g.proxy,
+          g.sbcDomainIp,
+          g.expire_seconds,
+          g.realm,
+          g.context,
+          g.retry_seconds,
+          g.register,
+          g.profile,
+          g.status,
+          g.enabled,
+          g.description,
+          g.extension,
+          g.auth_username,
+          g.register_proxy,
+          g.register_transport,
+          g.sip_cid_type,
+          g.outbound_proxy,
+          g.ping,
+          g.codec_prefs,
+          g.ping_max,
+          g.ping_min,
+          g.hostname,
+          g.channels,
+          g.caller_id_in_from,
+          g.distinct_to,
+          g.extension_in_contact,
+          g.supress_cng,
+          g.created_at,
+          g.updated_at
+        FROM ${TABLE} g
+        LEFT JOIN domains d
+          ON g.domain_name = d.id
         ${whereClause}
-        ORDER BY id DESC
+        ORDER BY g.id DESC
         LIMIT ? OFFSET ?
       `,
       [...whereValues, pageSize, offset],
@@ -279,63 +336,28 @@ export const getGatewayDetailsService = async (
   gateway_uuid: string,
 ): Promise<GatewayDetailsResponse> => {
   const [rows] = await pool.execute<GatewayDetails[]>(
-    `
-      SELECT
-        id,
-        gateway_uuid,
-        gateway,
-        username,
-        from_user,
-        domain_name,
-        sbcDomainIp,
-        proxy,
-        realm,
-        expire_seconds,
-        retry_seconds,
-        context,
-        profile,
-        register,
-        enabled,
-        description,
-        auth_username,
-        extension,
-        register_transport,
-        register_proxy,
-        outbound_proxy,
-        sip_cid_type,
-        codec_prefs,
-        ping,
-        ping_min,
-        ping_max,
-        channels,
-        hostname,
-        distinct_to,
-        caller_id_in_from,
-        supress_cng,
-        extension_in_contact,
-        created_at,
-        updated_at
-      FROM ${TABLE}
-      WHERE gateway_uuid = ?
-      LIMIT 1
-    `,
+    `SELECT 
+      gateways.*,
+      domains.domain
+   FROM ${TABLE} AS gateways
+   LEFT JOIN domains 
+      ON gateways.domain_name = domains.id
+   WHERE gateways.gateway_uuid = ?
+   LIMIT 1`,
     [gateway_uuid],
   );
 
-  const gateway = rows[0];
-
-  if (!gateway) {
-    throw new AppError("Gateway not found", 404);
-  }
+  const data = { ...rows[0], domain_name: rows[0].domain };
 
   return {
-    ...gateway,
-    register: Boolean(gateway.register),
-    enabled: Boolean(gateway.enabled),
-    distinct_to: Boolean(gateway.distinct_to),
-    caller_id_in_from: Boolean(gateway.caller_id_in_from),
-    supress_cng: Boolean(gateway.supress_cng),
-    extension_in_contact: Boolean(gateway.extension_in_contact),
+    ...data,
+    domainname: data.domain_name,
+    register: Boolean(data.register),
+    enabled: Boolean(data.enabled),
+    distinct_to: Boolean(data.distinct_to),
+    caller_id_in_from: Boolean(data.caller_id_in_from),
+    supress_cng: Boolean(data.supress_cng),
+    extension_in_contact: Boolean(data.extension_in_contact),
   };
 };
 
@@ -380,9 +402,16 @@ export const updateGatewayService = async (
     const hasNewPassword =
       typeof payload.password === "string" && payload.password.length > 0;
 
-    const columns = UPDATE_COLUMNS.filter(
-      (column) => column !== "password" || hasNewPassword,
-    );
+    // const columns = UPDATE_COLUMNS.filter(
+    //   (column) => column !== "password" || hasNewPassword,
+    // );
+
+    const columns = UPDATE_COLUMNS.filter((column) => {
+      if (column === "domain_name") return false;
+      if (column === "password" && !hasNewPassword) return false;
+
+      return true;
+    });
 
     const setClause = columns.map((column) => `\`${column}\` = ?`).join(", ");
 
@@ -406,8 +435,8 @@ export const updateGatewayService = async (
 
     const [updatedRows] = await connection.execute<UpdatedGatewayRow[]>(
       `SELECT
-          id,
-          gateway_uuid,
+      id,
+      gateway_uuid,
           gateway,
           username,
           from_user,
@@ -638,6 +667,79 @@ export const toggleGatewayEnableService = async (
         await connection.rollback();
       } catch (rollbackError) {
         console.error("Gateway toggle rollback failed:", rollbackError);
+      }
+    }
+
+    throw error;
+  } finally {
+    connection.release();
+  }
+};
+
+export const deleteGatewayService = async (
+  gatewayUuids: string[],
+): Promise<GatewayDeleteResponse> => {
+  const connection: PoolConnection = await pool.getConnection();
+
+  let transactionStarted = false;
+
+  try {
+    await connection.beginTransaction();
+    transactionStarted = true;
+
+    const placeholders = gatewayUuids.map(() => "?").join(", ");
+
+    // Lock and verify all requested gateways.
+    const [existingRows] = await connection.execute<GatewayUuidRow[]>(
+      `SELECT gateway_uuid
+         FROM gateways
+         WHERE gateway_uuid IN (${placeholders})
+         ORDER BY gateway_uuid
+         FOR UPDATE`,
+      gatewayUuids,
+    );
+
+    const existingUuids = new Set(
+      existingRows.map((row) => row.gateway_uuid.toLowerCase()),
+    );
+
+    const missingUuids = gatewayUuids.filter(
+      (uuid) => !existingUuids.has(uuid),
+    );
+
+    // All-or-nothing: do not partially delete.
+    if (missingUuids.length > 0) {
+      throw new AppError(
+        `Gateway(s) not found: ${missingUuids.join(", ")}`,
+        404,
+      );
+    }
+
+    // Delete all matching gateway records in one statement.
+    const [deleteResult] = await connection.execute<ResultSetHeader>(
+      `DELETE FROM gateways
+         WHERE gateway_uuid IN (${placeholders})`,
+      gatewayUuids,
+    );
+
+    if (deleteResult.affectedRows !== gatewayUuids.length) {
+      throw new AppError("Unable to delete all requested gateways", 500);
+    }
+
+    await connection.commit();
+    transactionStarted = false;
+
+    return {
+      totalRequested: gatewayUuids.length,
+      totalDeleted: deleteResult.affectedRows,
+      deletedGatewayUuids: existingRows.map((row) => row.gateway_uuid),
+    };
+  } catch (error) {
+    if (transactionStarted) {
+      try {
+        await connection.rollback();
+      } catch (rollbackError) {
+        console.error("Gateway deletion rollback failed:", rollbackError);
       }
     }
 

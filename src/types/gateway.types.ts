@@ -358,3 +358,13 @@ export interface CreateGatewayResult {
   created_at: Date;
   updated_at: Date;
 }
+
+export interface GatewayUuidRow extends RowDataPacket {
+  gateway_uuid: string;
+}
+
+export interface GatewayDeleteResponse {
+  totalRequested: number;
+  totalDeleted: number;
+  deletedGatewayUuids: string[];
+}
