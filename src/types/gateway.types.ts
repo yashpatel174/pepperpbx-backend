@@ -368,3 +368,8 @@ export interface GatewayDeleteResponse {
   totalDeleted: number;
   deletedGatewayUuids: string[];
 }
+
+export interface GatewayCopyPayload {
+  gatewayUuid: string;
+  copy_gateway: string;
+}

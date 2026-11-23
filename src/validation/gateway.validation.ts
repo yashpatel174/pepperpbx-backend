@@ -1,6 +1,6 @@
 import {
   FieldRule,
-  GatewayListQuery,
+  GatewayCopyPayload,
   GatewayPayload,
   GatewayTogglePayload,
   GatewayToggleStatusPayload,
@@ -283,74 +283,6 @@ export const validateCreateGateway = (
   return validatedPayload as unknown as GatewayPayload;
 };
 
-export const validateGatewayListQuery = (
-  query: Record<string, unknown>,
-): GatewayListQuery => {
-  const allowedKeys = new Set(["page", "pageSize", "search"]);
-
-  const invalidFields = Object.keys(query).filter(
-    (key) => !allowedKeys.has(key),
-  );
-
-  if (invalidFields.length > 0) {
-    throw new AppError(
-      `Invalid query parameters: ${invalidFields.join(", ")}`,
-      400,
-    );
-  }
-
-  const parsePositiveInteger = (
-    value: unknown,
-    field: string,
-    defaultValue: number,
-    max?: number,
-  ): number => {
-    if (value === undefined) {
-      return defaultValue;
-    }
-
-    if (typeof value !== "string" || !/^[1-9]\d*$/.test(value)) {
-      throw new AppError(`${field} must be a positive integer`, 400);
-    }
-
-    const parsed = Number(value);
-
-    if (!Number.isSafeInteger(parsed)) {
-      throw new AppError(`${field} must be a safe integer`, 400);
-    }
-
-    if (max !== undefined && parsed > max) {
-      throw new AppError(`${field} must not exceed ${max}`, 400);
-    }
-
-    return parsed;
-  };
-
-  const page = parsePositiveInteger(query.page, "page", 1);
-
-  const pageSize = parsePositiveInteger(query.pageSize, "pageSize", 10, 100);
-
-  let search = "";
-
-  if (query.search !== undefined) {
-    if (typeof query.search !== "string") {
-      throw new AppError("search must be a string", 400);
-    }
-
-    search = query.search.trim();
-
-    if (search.length > 100) {
-      throw new AppError("search must not exceed 100 characters", 400);
-    }
-  }
-
-  return {
-    page,
-    pageSize,
-    search,
-  };
-};
-
 const OPTIONAL_FIELDS: (keyof GatewayPayload)[] = [
   "username",
   "from_user",
@@ -473,64 +405,6 @@ export const validateUpdateGateway = (
   return result as unknown as GatewayPayload;
 };
 
-export const validateGatewayStatusToggle = (
-  payload: unknown,
-): GatewayToggleStatusPayload => {
-  if (
-    typeof payload !== "object" ||
-    payload === null ||
-    Array.isArray(payload)
-  ) {
-    throw new AppError("Valid request payload is required", 400);
-  }
-
-  const input = payload as Record<string, unknown>;
-
-  const allowedFields = ["gatewayUuids", "action"];
-
-  if (Object.keys(input).some((key) => !allowedFields.includes(key))) {
-    throw new AppError("Unknown request field", 400);
-  }
-
-  if (!Array.isArray(input.gatewayUuids)) {
-    throw new AppError("gatewayUuids must be an array", 400);
-  }
-
-  if (
-    input.gatewayUuids.length === 0 ||
-    input.gatewayUuids.length > MAX_GATEWAYS_PER_REQUEST
-  ) {
-    throw new AppError(
-      `gatewayUuids must contain between 1 and ${MAX_GATEWAYS_PER_REQUEST} UUIDs`,
-      400,
-    );
-  }
-
-  if (
-    !input.gatewayUuids.every(
-      (uuid): uuid is string =>
-        typeof uuid === "string" && UUID_REGEX.test(uuid),
-    )
-  ) {
-    throw new AppError("One or more gateway UUIDs are invalid", 400);
-  }
-
-  if (input.action !== "start" && input.action !== "stop") {
-    throw new AppError('action must be either "start" or "stop"', 400);
-  }
-
-  const gatewayUuids = input.gatewayUuids.map((uuid) => uuid.toLowerCase());
-
-  if (new Set(gatewayUuids).size !== gatewayUuids.length) {
-    throw new AppError("Duplicate gateway UUIDs are not allowed", 400);
-  }
-
-  return {
-    gatewayUuids,
-    action: input.action,
-  };
-};
-
 const MAX_GATEWAYS_PER_REQUEST = 500;
 
 export const validateGatewayToggle = (
@@ -638,5 +512,103 @@ export const validateGatewayDelete = (
 
   return {
     gatewayUuids: normalizedUuids,
+  };
+};
+
+export const validateGatewayStatusToggle = (
+  payload: unknown,
+): GatewayToggleStatusPayload => {
+  if (
+    typeof payload !== "object" ||
+    payload === null ||
+    Array.isArray(payload)
+  ) {
+    throw new AppError("Valid request payload is required", 400);
+  }
+
+  const input = payload as Record<string, unknown>;
+
+  const allowedFields = ["gatewayUuids", "action"];
+
+  if (Object.keys(input).some((key) => !allowedFields.includes(key))) {
+    throw new AppError("Unknown request field", 400);
+  }
+
+  if (!Array.isArray(input.gatewayUuids)) {
+    throw new AppError("gatewayUuids must be an array", 400);
+  }
+
+  if (
+    input.gatewayUuids.length === 0 ||
+    input.gatewayUuids.length > MAX_GATEWAYS_PER_REQUEST
+  ) {
+    throw new AppError(
+      `gatewayUuids must contain between 1 and ${MAX_GATEWAYS_PER_REQUEST} UUIDs`,
+      400,
+    );
+  }
+
+  if (
+    !input.gatewayUuids.every(
+      (uuid): uuid is string =>
+        typeof uuid === "string" && UUID_REGEX.test(uuid),
+    )
+  ) {
+    throw new AppError("One or more gateway UUIDs are invalid", 400);
+  }
+
+  if (input.action !== "start" && input.action !== "stop") {
+    throw new AppError('action must be either "start" or "stop"', 400);
+  }
+
+  const gatewayUuids = input.gatewayUuids.map((uuid) => uuid.toLowerCase());
+
+  if (new Set(gatewayUuids).size !== gatewayUuids.length) {
+    throw new AppError("Duplicate gateway UUIDs are not allowed", 400);
+  }
+
+  return {
+    gatewayUuids,
+    action: input.action,
+  };
+};
+
+export const validateGatewayCopy = (payload: unknown): GatewayCopyPayload => {
+  if (
+    typeof payload !== "object" ||
+    payload === null ||
+    Array.isArray(payload)
+  ) {
+    throw new AppError("Valid request payload is required", 400);
+  }
+
+  const input = payload as Record<string, unknown>;
+
+  const allowedFields = ["gatewayUuid", "new_gateway"];
+
+  if (Object.keys(input).some((key) => !allowedFields.includes(key))) {
+    throw new AppError("Unknown request field", 400);
+  }
+
+  if (
+    typeof input.gatewayUuid !== "string" ||
+    !UUID_REGEX.test(input.gatewayUuid)
+  ) {
+    throw new AppError("Valid gatewayUuid is required", 400);
+  }
+
+  if (typeof input.new_gateway !== "string" || !input.new_gateway.trim()) {
+    throw new AppError("copy_gateway is required", 400);
+  }
+
+  const copyGateway = input.new_gateway.trim();
+
+  if (copyGateway.length > 255) {
+    throw new AppError("copy_gateway cannot exceed 255 characters", 400);
+  }
+
+  return {
+    gatewayUuid: input.gatewayUuid.toLowerCase(),
+    copy_gateway: copyGateway,
   };
 };

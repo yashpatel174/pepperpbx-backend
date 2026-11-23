@@ -310,7 +310,8 @@ export const getGatewaysService = async (
       caller_id_in_from: Boolean(gateway.caller_id_in_from),
       supress_cng: Boolean(gateway.supress_cng),
       extension_in_contact: Boolean(gateway.extension_in_contact),
-      status: gateway.status === true ? "Started" : "Stopped",
+      gatewayaction: gateway.status === 1 ? "Started" : "Stopped",
+      status: gateway.status === 1 ? "Started" : "Stopped",
     }));
 
     return {
@@ -509,102 +510,6 @@ export const updateGatewayService = async (
   }
 };
 
-export const toggleGatewayStatusService = async (
-  gatewayUuids: string[],
-  action: GatewayAction,
-): Promise<GatewayToggleResponse> => {
-  const connection: PoolConnection = await pool.getConnection();
-
-  let transactionStarted = false;
-
-  // start = 1 (enabled), stop = 0 (disabled)
-  const enabledValue = action === "start" ? 1 : 0;
-
-  try {
-    await connection.beginTransaction();
-    transactionStarted = true;
-
-    const placeholders = gatewayUuids.map(() => "?").join(", ");
-
-    // Lock all requested gateways before updating.
-    const [existingRows] = await connection.execute<GatewayStatusRow[]>(
-      `SELECT gateway_uuid, status
-         FROM gateways
-         WHERE gateway_uuid IN (${placeholders})
-         ORDER BY gateway_uuid
-         FOR UPDATE`,
-      gatewayUuids,
-    );
-
-    const existingUuids = new Set(
-      existingRows.map((row) => row.gateway_uuid.toLowerCase()),
-    );
-
-    const missingUuids = gatewayUuids.filter(
-      (uuid) => !existingUuids.has(uuid),
-    );
-
-    // All-or-nothing behavior.
-    if (missingUuids.length > 0) {
-      throw new AppError(
-        `Gateway(s) not found: ${missingUuids.join(", ")}`,
-        404,
-      );
-    }
-
-    // Set the requested status. Do not invert the current value.
-    // This makes repeated start/stop requests idempotent.
-    await connection.execute(
-      `UPDATE gateways
-       SET status = ?
-       WHERE gateway_uuid IN (${placeholders})`,
-      [enabledValue, ...gatewayUuids],
-    );
-
-    // Retrieve the final status of every requested gateway.
-    const [updatedRows] = await connection.execute<GatewayStatusRow[]>(
-      `SELECT gateway_uuid, status
-         FROM gateways
-         WHERE gateway_uuid IN (${placeholders})
-         ORDER BY gateway_uuid`,
-      gatewayUuids,
-    );
-
-    if (updatedRows.length !== gatewayUuids.length) {
-      throw new AppError(
-        "Unable to retrieve all updated gateway statuses",
-        500,
-      );
-    }
-
-    await connection.commit();
-    transactionStarted = false;
-
-    return {
-      action,
-      enabled: Boolean(enabledValue),
-      totalRequested: gatewayUuids.length,
-      totalUpdated: updatedRows.length,
-      gateways: updatedRows.map((gateway) => ({
-        gateway_uuid: gateway.gateway_uuid,
-        status: gateway.status === 1 ? "Started" : "Stopped",
-      })),
-    };
-  } catch (error) {
-    if (transactionStarted) {
-      try {
-        await connection.rollback();
-      } catch (rollbackError) {
-        console.error("Gateway status update rollback failed:", rollbackError);
-      }
-    }
-
-    throw error;
-  } finally {
-    connection.release();
-  }
-};
-
 export const toggleGatewayEnableService = async (
   gatewayUuids: string[],
 ): Promise<GatewayEnabledToggleResponse> => {
@@ -740,6 +645,290 @@ export const deleteGatewayService = async (
         await connection.rollback();
       } catch (rollbackError) {
         console.error("Gateway deletion rollback failed:", rollbackError);
+      }
+    }
+
+    throw error;
+  } finally {
+    connection.release();
+  }
+};
+
+export const toggleGatewayStatusService = async (
+  gatewayUuids: string[],
+  action: GatewayAction,
+): Promise<GatewayToggleResponse> => {
+  const connection: PoolConnection = await pool.getConnection();
+
+  let transactionStarted = false;
+
+  const enabledValue = action === "start" ? 1 : 0;
+
+  try {
+    await connection.beginTransaction();
+    transactionStarted = true;
+
+    const placeholders = gatewayUuids.map(() => "?").join(", ");
+
+    // Lock all requested gateway records.
+    const [existingRows] = await connection.execute<GatewayStatusRow[]>(
+      `SELECT gateway_uuid, register, status
+         FROM gateways
+         WHERE gateway_uuid IN (${placeholders})
+         ORDER BY gateway_uuid
+         FOR UPDATE`,
+      gatewayUuids,
+    );
+
+    // 1. Check whether all requested gateways exist.
+    const existingUuids = new Set(
+      existingRows.map((row) => row.gateway_uuid.toLowerCase()),
+    );
+
+    const missingUuids = gatewayUuids.filter(
+      (uuid) => !existingUuids.has(uuid),
+    );
+
+    if (missingUuids.length > 0) {
+      throw new AppError(
+        `Gateway(s) not found: ${missingUuids.join(", ")}`,
+        404,
+      );
+    }
+
+    // 2. Check whether all gateways are registered.
+    const unregisteredGateways = existingRows
+      .filter((gateway) => Number(gateway.register) !== 1)
+      .map((gateway) => gateway.gateway_uuid);
+
+    if (unregisteredGateways.length > 0) {
+      throw new AppError(
+        `The gateway must be registered before it can be ${action === "start" ? "started" : "stopped"}. Unregistered gateway(s): ${unregisteredGateways.join(", ")}`,
+        409,
+      );
+    }
+
+    // 3. Update all gateways only after every validation passes.
+    // start = 1, stop = 0.
+    await connection.execute(
+      `UPDATE gateways
+       SET status = ?
+       WHERE gateway_uuid IN (${placeholders})`,
+      [enabledValue, ...gatewayUuids],
+    );
+
+    // 4. Retrieve the final statuses.
+    const [updatedRows] = await connection.execute<GatewayStatusRow[]>(
+      `SELECT gateway_uuid, register, status
+         FROM gateways
+         WHERE gateway_uuid IN (${placeholders})
+         ORDER BY gateway_uuid`,
+      gatewayUuids,
+    );
+
+    if (updatedRows.length !== gatewayUuids.length) {
+      throw new AppError(
+        "Unable to retrieve all updated gateway statuses",
+        500,
+      );
+    }
+
+    await connection.commit();
+    transactionStarted = false;
+
+    return {
+      action,
+      enabled: enabledValue === 1,
+      totalRequested: gatewayUuids.length,
+      totalUpdated: updatedRows.length,
+      gateways: updatedRows.map((gateway) => ({
+        gateway_uuid: gateway.gateway_uuid,
+        status: Number(gateway.status) === 1 ? "Started" : "Stopped",
+      })),
+    };
+  } catch (error) {
+    if (transactionStarted) {
+      try {
+        await connection.rollback();
+      } catch (rollbackError) {
+        console.error("Gateway status update rollback failed:", rollbackError);
+      }
+    }
+
+    throw error;
+  } finally {
+    connection.release();
+  }
+};
+
+export const copyGatewayService = async (
+  gatewayUuid: string,
+  copyGateway: string,
+): Promise<CreateGatewayResult> => {
+  const connection: PoolConnection = await pool.getConnection();
+
+  let transactionStarted = false;
+
+  try {
+    await connection.beginTransaction();
+    transactionStarted = true;
+
+    // 1. Find and lock the original gateway.
+    const [originalRows] = await pool.execute<RowDataPacket[]>(
+      `SELECT id, domain_name
+         FROM gateways
+         WHERE gateway_uuid = ?
+         LIMIT 1
+         FOR UPDATE`,
+      [gatewayUuid],
+    );
+
+    if (originalRows.length === 0) {
+      throw new AppError("Original gateway not found", 404);
+    }
+
+    const originalGateway = originalRows[0];
+
+    // 2. Check whether the new gateway name already exists
+    // under the original gateway's domain.
+    const [duplicateRows] = await connection.execute<RowDataPacket[]>(
+      `SELECT id
+         FROM gateways
+         WHERE domain_name = ?
+           AND gateway = ?
+         LIMIT 1`,
+      [originalGateway.domain_name, copyGateway],
+    );
+
+    if (duplicateRows.length > 0) {
+      throw new AppError(
+        "A gateway with this name already exists under the same domain",
+        409,
+      );
+    }
+
+    // 3. Copy all original configuration fields directly in MySQL.
+    // Only gateway_uuid and gateway receive new values.
+    // id, created_at and updated_at are generated automatically.
+    const [insertResult] = await connection.execute<ResultSetHeader>(
+      `INSERT INTO gateways (
+          gateway,
+          username,
+          password,
+          from_user,
+          domain_name,
+          sbcDomainIp,
+          proxy,
+          realm,
+          expire_seconds,
+          retry_seconds,
+          context,
+          profile,
+          register,
+          enabled,
+          description,
+          auth_username,
+          extension,
+          register_transport,
+          register_proxy,
+          outbound_proxy,
+          sip_cid_type,
+          codec_prefs,
+          ping,
+          ping_min,
+          ping_max,
+          channels,
+          hostname,
+          distinct_to,
+          caller_id_in_from,
+          supress_cng,
+          extension_in_contact
+        )
+        SELECT
+          ?,
+          username,
+          password,
+          from_user,
+          domain_name,
+          sbcDomainIp,
+          proxy,
+          realm,
+          expire_seconds,
+          retry_seconds,
+          context,
+          profile,
+          register,
+          enabled,
+          description,
+          auth_username,
+          extension,
+          register_transport,
+          register_proxy,
+          outbound_proxy,
+          sip_cid_type,
+          codec_prefs,
+          ping,
+          ping_min,
+          ping_max,
+          channels,
+          hostname,
+          distinct_to,
+          caller_id_in_from,
+          supress_cng,
+          extension_in_contact
+        FROM gateways
+        WHERE gateway_uuid = ?`,
+      [copyGateway, gatewayUuid],
+    );
+
+    if (insertResult.affectedRows !== 1) {
+      throw new AppError("Unable to copy gateway", 500);
+    }
+
+    // 4. Retrieve the new gateway without selecting its password.
+    const [createdRows] = await connection.execute<CreatedGateway[]>(
+      `SELECT
+          id,
+        gateway_uuid,
+        gateway,
+        domain_name,
+        sbcDomainIp,
+        proxy,
+        expire_seconds,
+        retry_seconds,
+        register,
+        enabled,
+        created_at,
+        updated_at
+        FROM gateways
+        WHERE gateway = ?
+        LIMIT 1`,
+      [copyGateway],
+    );
+
+    if (createdRows.length === 0) {
+      throw new AppError(
+        "Gateway copied but the new record could not be retrieved",
+        500,
+      );
+    }
+
+    const createdGateway = createdRows[0];
+
+    await connection.commit();
+    transactionStarted = false;
+
+    return {
+      ...createdGateway,
+      register: Boolean(createdGateway.register),
+      enabled: Boolean(createdGateway.enabled),
+    };
+  } catch (error) {
+    if (transactionStarted) {
+      try {
+        await connection.rollback();
+      } catch (rollbackError) {
+        console.error("Gateway copy rollback failed:", rollbackError);
       }
     }
 

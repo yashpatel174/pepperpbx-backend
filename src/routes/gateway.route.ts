@@ -1,5 +1,6 @@
 import { Router } from "express";
 import {
+  copyGateway,
   createGateway,
   deleteGateway,
   getGatewayDetails,
@@ -17,6 +18,7 @@ router.use(setErrorModule("gateway"));
 
 router.post("/create", asyncHandler(createGateway));
 router.get("/list", asyncHandler(getGateways));
+router.patch("/copy", asyncHandler(copyGateway));
 router.patch("/startStop", asyncHandler(toggleGatewayStatus));
 router.patch("/toggle", asyncHandler(toggleGatewayEnableStatus));
 router.get("/details/:gateway_uuid", asyncHandler(getGatewayDetails));

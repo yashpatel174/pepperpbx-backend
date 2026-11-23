@@ -1,5 +1,6 @@
 import { Request, Response } from "express";
 import {
+  copyGatewayService,
   createGatewayService,
   deleteGatewayService,
   getGatewayDetailsService,
@@ -10,8 +11,8 @@ import {
 } from "../services/gateway.service";
 import {
   validateCreateGateway,
+  validateGatewayCopy,
   validateGatewayDelete,
-  validateGatewayListQuery,
   validateGatewayStatusToggle,
   validateGatewayToggle,
   validateUpdateGateway,
@@ -39,14 +40,28 @@ export const getGateways = async (
   req: Request,
   res: Response,
 ): Promise<void> => {
-  const filters = validateGatewayListQuery(
-    req.params as Record<string, unknown>,
-  );
+  const requestedPage = Number(req.query.page ?? 1);
+  const requestedPageSize = Number(req.query.pageSize ?? 10);
+
+  const page =
+    Number.isSafeInteger(requestedPage) && requestedPage > 0
+      ? requestedPage
+      : 1;
+
+  const pageSize =
+    Number.isSafeInteger(requestedPageSize) && requestedPageSize > 0
+      ? Math.min(requestedPageSize, 100)
+      : 10;
+
+  const search =
+    typeof req.query.search === "string" ? req.query.search.trim() : "";
 
   const showAll = req.query.showAll === "true";
 
   const domain =
     typeof req.query.domain === "string" ? req.query.domain.trim() : "";
+
+  const filters = { page, pageSize, search };
 
   const result = await getGatewaysService(filters, showAll, domain);
 
@@ -139,5 +154,20 @@ export const deleteGateway = async (
     success: true,
     message: "Gateways deleted successfully",
     data: result,
+  });
+};
+
+export const copyGateway = async (
+  req: Request,
+  res: Response,
+): Promise<void> => {
+  const { gatewayUuid, copy_gateway } = validateGatewayCopy(req.body);
+
+  const gateway = await copyGatewayService(gatewayUuid, copy_gateway);
+
+  res.status(201).json({
+    success: true,
+    message: "Gateway copied successfully",
+    data: gateway,
   });
 };
